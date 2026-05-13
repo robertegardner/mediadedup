@@ -1,0 +1,6 @@
+Static asset directory.
+
+Currently unused -- no templates reference /static/. The dir exists so that
+future static files can be dropped in without code changes, and so that the
+tarball preserves the directory structure regardless of platform-specific
+tar quirks around empty dirs.

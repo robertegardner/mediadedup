@@ -1,0 +1,1553 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — Media Dedup{% endblock %}
+
+{% block content %}
+
+<style>
+  /* Live-activity-specific styles. The base.html stylesheet covers cards,
+     pills, tables, etc.; we only add things unique to this view here. */
+  .live-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 0 0 12px;
+  }
+  .live-header h2 { margin: 0; }
+  .live-status {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--muted); font-size: 12px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--good); box-shadow: 0 0 0 0 rgba(76,175,80,0.6);
+    animation: pulse 1.6s infinite;
+  }
+  .live-dot.stale { background: var(--warn); animation: none; }
+  .live-dot.dead  { background: var(--bad);  animation: none; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(76,175,80,0.55); }
+    70%  { box-shadow: 0 0 0 8px rgba(76,175,80,0);    }
+    100% { box-shadow: 0 0 0 0   rgba(76,175,80,0);    }
+  }
+  .live-grid {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 16px;
+    margin-bottom: 24px;
+  }
+  @media (max-width: 900px) { .live-grid { grid-template-columns: 1fr; } }
+
+  .inflight-row {
+    display: grid;
+    grid-template-columns: 28px 1fr 90px 90px 60px;
+    gap: 10px; padding: 8px 0; align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .inflight-row:last-child { border-bottom: none; }
+  .inflight-row .icon { font-size: 18px; text-align: center; }
+  .inflight-row .name {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .inflight-row .meta { color: var(--muted); font-size: 12px; text-align: right; }
+  .inflight-row .elapsed { font-variant-numeric: tabular-nums; text-align: right; }
+  .inflight-row.warn .elapsed { color: var(--warn); }
+
+  .progress {
+    height: 6px; background: var(--panel-2); border-radius: 3px;
+    overflow: hidden; margin-top: 6px;
+  }
+  .progress > .bar {
+    height: 100%; background: var(--accent);
+    transition: width 0.5s ease;
+  }
+  .progress > .bar.audio { background: #b07cff; }
+
+  .activity-list { font-size: 12px; }
+  .activity-list .row {
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .activity-list .row:last-child { border-bottom: none; }
+  .activity-list .name {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; min-width: 0;
+  }
+  .activity-list .meta { color: var(--muted); white-space: nowrap; }
+  .activity-list .err  { color: var(--bad); white-space: normal; word-break: break-word; }
+
+  .throughput {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .throughput .stat .v { font-size: 18px; }
+
+  .empty-row { padding: 16px 0; color: var(--muted); font-size: 13px; }
+</style>
+
+<div class="live-header">
+  <h2>Live activity</h2>
+  <span class="live-status">
+    <span id="liveDot" class="live-dot"></span>
+    <span id="liveLabel">connecting…</span>
+  </span>
+</div>
+
+<div class="live-grid">
+  <!-- LEFT: in-flight files + throughput -->
+  <div class="card">
+    <h3>Workers in flight (<span id="inflightCount">0</span>)</h3>
+    <div id="inflight"><div class="empty-row">No files currently being processed.</div></div>
+
+    <div class="throughput">
+      <div class="stat">
+        <span class="v" id="tpFilesPerMin">0</span>
+        <span class="l">files/min (5m avg)</span>
+      </div>
+      <div class="stat">
+        <span class="v" id="tpMbPerSec">0</span>
+        <span class="l">MB/sec (5m avg)</span>
+      </div>
+      <div class="stat">
+        <span class="v" id="tpEta">—</span>
+        <span class="l">ETA (at current rate)</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: recent done + recent failed -->
+  <div class="card">
+    <h3>Recently completed</h3>
+    <div id="recentDone" class="activity-list">
+      <div class="empty-row">Nothing finished yet.</div>
+    </div>
+
+    <h3 style="margin-top:16px">Recent failures</h3>
+    <div id="recentFailed" class="activity-list">
+      <div class="empty-row">No failures.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Static progress overview (also driven by /api/activity) -->
+<h2>Files</h2>
+<div class="grid grid-4">
+  <div class="card">
+    <h3>Video</h3>
+    <div class="stat"><span class="v" id="vTracked">0</span><span class="l">tracked</span></div>
+    <div class="progress"><div class="bar" id="vBar" style="width:0%"></div></div>
+    <div style="margin-top:8px">
+      <span class="pill done">done <span id="vDone">0</span></span>
+      <span class="pill pending">pending <span id="vPending">0</span></span>
+      <span class="pill processing">processing <span id="vProcessing">0</span></span>
+      <span class="pill failed">failed <span id="vFailed">0</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Audio</h3>
+    <div class="stat"><span class="v" id="aTracked">0</span><span class="l">tracked</span></div>
+    <div class="progress"><div class="bar audio" id="aBar" style="width:0%"></div></div>
+    <div style="margin-top:8px">
+      <span class="pill done">done <span id="aDone">0</span></span>
+      <span class="pill pending">pending <span id="aPending">0</span></span>
+      <span class="pill processing">processing <span id="aProcessing">0</span></span>
+      <span class="pill failed">failed <span id="aFailed">0</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Reclaimable space</h3>
+    <div class="stat"><span class="v">{{ wasted.get('video', 0) | bytes }}</span><span class="l">video duplicates</span></div>
+    <div class="stat" style="margin-top:8px"><span class="v">{{ wasted.get('audio', 0) | bytes }}</span><span class="l">audio duplicates</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Queue</h3>
+    <div class="stat"><span class="v" id="qQueued">0</span><span class="l">queued</span></div>
+    <div class="stat" style="margin-top:8px"><span class="v" id="qStarted">0</span><span class="l">running</span></div>
+    <div class="stat" style="margin-top:8px"><span class="v" id="qFailed">0</span><span class="l">RQ failed</span></div>
+  </div>
+</div>
+
+<h2>Sources</h2>
+
+<div class="card" id="sourcesCard">
+  <div class="muted" style="margin-bottom:12px">
+    Configured scan roots. Add a row for each subdirectory under <code>/media</code>
+    that contains files you want fingerprinted. Multiple sources share one
+    fingerprint database, so duplicates are found across all of them.
+    <strong>Higher priority = preferred keeper</strong> when dupes span sources.
+  </div>
+
+  <div style="overflow-x:auto">
+    <table id="sourcesTable">
+      <thead>
+        <tr>
+          <th>Name</th><th>Path</th><th>Type</th><th>Priority</th>
+          <th>Files</th><th>State</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="sourcesBody"><tr><td colspan="7" class="empty-row">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <details style="margin-top:12px">
+    <summary style="cursor:pointer">+ Add a source</summary>
+    <form id="newSourceForm" style="margin-top:12px;
+                                    display:grid;
+                                    grid-template-columns: repeat(3, 1fr) auto;
+                                    gap:8px; align-items:end">
+      <label>Name<br>
+        <input type="text" name="name" required style="width:100%"
+               placeholder="archive-2019">
+      </label>
+      <label>Path (inside container)<br>
+        <input type="text" name="path" required style="width:100%"
+               placeholder="/media/archive-2019">
+      </label>
+      <label>Media type<br>
+        <select name="media_type" style="width:100%">
+          <option value="video">video</option>
+          <option value="audio">audio</option>
+          <option value="both">both</option>
+        </select>
+      </label>
+      <label>Priority<br>
+        <input type="number" name="priority" value="0" style="width:80px">
+      </label>
+      <label style="grid-column: 1 / -2">Notes (optional)<br>
+        <input type="text" name="notes" style="width:100%"
+               placeholder="What's in this share?">
+      </label>
+      <button type="submit" class="primary">Add</button>
+    </form>
+  </details>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+
+  function fmtBytes(b) {
+    if (b == null) return '—';
+    const u = ['B','KB','MB','GB','TB'];
+    let f = +b, i = 0;
+    while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+    return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/sources', {cache: 'no-store'});
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      renderRows(data.sources || []);
+    } catch (e) {
+      $('sourcesBody').innerHTML =
+        `<tr><td colspan="7" class="empty-row">Failed to load: ${escapeHtml(e)}</td></tr>`;
+    }
+  }
+
+  function renderRows(rows) {
+    if (!rows.length) {
+      $('sourcesBody').innerHTML =
+        `<tr><td colspan="7" class="empty-row">No sources configured. Add one below.</td></tr>`;
+      return;
+    }
+    $('sourcesBody').innerHTML = rows.map(s => {
+      const counts = s.file_counts || {};
+      const total = ['pending','processing','done','failed']
+        .reduce((acc, k) => acc + ((counts[k] || {}).n || 0), 0);
+      const bytes = Object.values(counts)
+        .reduce((acc, r) => acc + (r.bytes || 0), 0);
+
+      let state;
+      if (!s.enabled) {
+        state = '<span class="pill">disabled</span>';
+      } else if (!s.path_exists) {
+        state = '<span class="pill failed">path missing</span>';
+      } else {
+        state = '<span class="pill reviewed">ok</span>';
+      }
+
+      return `<tr data-id="${s.id}">
+        <td><strong>${escapeHtml(s.name)}</strong>
+          ${s.notes ? `<br><span class="muted" style="font-size:11px">${escapeHtml(s.notes)}</span>` : ''}
+        </td>
+        <td class="path">${escapeHtml(s.path)}</td>
+        <td><span class="pill ${s.media_type === 'audio' ? 'audio' : 'video'}">${s.media_type}</span></td>
+        <td>${s.priority}</td>
+        <td>${total.toLocaleString()}<br>
+          <span class="muted" style="font-size:11px">${fmtBytes(bytes)}</span></td>
+        <td>${state}</td>
+        <td style="white-space:nowrap">
+          <button type="button" class="btn-scan" data-id="${s.id}">Scan</button>
+          <button type="button" class="btn-toggle" data-id="${s.id}" data-enabled="${s.enabled}">
+            ${s.enabled ? 'Disable' : 'Enable'}
+          </button>
+          <button type="button" class="btn-delete danger" data-id="${s.id}" data-name="${escapeHtml(s.name)}">×</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    // Wire up per-row actions
+    $('sourcesBody').querySelectorAll('.btn-scan').forEach(b => {
+      b.addEventListener('click', async () => {
+        const id = b.dataset.id;
+        const fd = new FormData(); fd.append('source_ids', id);
+        const r = await fetch('/api/run/scanner_for', {method: 'POST', body: fd});
+        if (!r.ok) { alert(`Scan failed: HTTP ${r.status}`); return; }
+        // The scanner & matcher card will reflect the running state.
+      });
+    });
+    $('sourcesBody').querySelectorAll('.btn-toggle').forEach(b => {
+      b.addEventListener('click', async () => {
+        const id = b.dataset.id;
+        const enabled = b.dataset.enabled === 'true' ? 'false' : 'true';
+        const fd = new FormData(); fd.append('enabled', enabled);
+        const r = await fetch(`/api/sources/${id}/update`, {method: 'POST', body: fd});
+        if (!r.ok) { alert(`Update failed: HTTP ${r.status}`); return; }
+        refresh();
+      });
+    });
+    $('sourcesBody').querySelectorAll('.btn-delete').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm(`Delete source "${b.dataset.name}"?\n\n` +
+                     `Files known under this source will keep their fingerprints` +
+                     ` (you can re-add the source later) but their source assignment` +
+                     ` clears. No files are moved or deleted on disk.`)) return;
+        const r = await fetch(`/api/sources/${b.dataset.id}/delete`, {method: 'POST'});
+        if (!r.ok) { alert(`Delete failed: HTTP ${r.status}`); return; }
+        refresh();
+      });
+    });
+  }
+
+  $('newSourceForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const r = await fetch('/api/sources', {method: 'POST', body: fd});
+    if (!r.ok) {
+      const t = await r.text();
+      alert(`Add failed: ${r.status}\n${t}`);
+      return;
+    }
+    e.target.reset();
+    refresh();
+  });
+
+  refresh();
+  setInterval(refresh, 10000);
+})();
+</script>
+
+
+<h2>Scanner &amp; matcher</h2>
+
+<div class="card" id="orchestratorCard">
+  <div style="display:grid; grid-template-columns: 2fr 1fr; gap:16px; align-items:start;">
+    <div>
+      <div id="orchCurrent" class="muted" style="margin-bottom:12px">
+        <em>Loading status…</em>
+      </div>
+
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+        <button type="button" id="btnScanner" class="primary">Run scanner</button>
+        <button type="button" id="btnMatcher" class="primary">Run matcher</button>
+        <button type="button" id="btnScanMatch">Run scanner + matcher</button>
+      </div>
+
+      <h3 style="margin-top:8px">Recent runs</h3>
+      <div id="orchRecent" class="activity-list">
+        <div class="empty-row">No runs recorded yet.</div>
+      </div>
+    </div>
+
+    <div>
+      <h3>Schedule</h3>
+      <div id="orchSchedule" class="muted">
+        <em>Loading…</em>
+      </div>
+      <div class="muted" style="margin-top:12px; font-size:11px">
+        Configure in <code>.env</code>:<br>
+        <code>DEDUP_SCHEDULE_CRON</code> (default <code>0 4 * * *</code>, UTC)<br>
+        <code>DEDUP_AUTO_DELETE_EXACT</code> (0 or 1)<br>
+        <code>DEDUP_AUTO_DELETE_SIM_THRESHOLD</code> (e.g. 0.98)
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const POLL_MS = 3000;
+
+  function fmtDuration(s) {
+    if (s == null) return '—';
+    s = Math.round(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h ? `${h}h${String(m).padStart(2,'0')}m`
+             : m ? `${m}m${String(sec).padStart(2,'0')}s`
+                 : `${sec}s`;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+  }
+
+  function renderCurrent(cur) {
+    if (!cur) {
+      $('orchCurrent').innerHTML = '<span class="pill">Idle</span> '
+        + '<span class="muted">No scanner or matcher run is in progress.</span>';
+      // Re-enable all buttons; orchestrator's lock will refuse if one's actually running
+      $('btnScanner').disabled = false;
+      $('btnMatcher').disabled = false;
+      $('btnScanMatch').disabled = false;
+      return;
+    }
+    $('orchCurrent').innerHTML =
+      `<span class="pill ${cur.kind === 'scanner' ? 'video' : 'audio'}">running</span> ` +
+      `<strong>${escapeHtml(cur.kind)}</strong> ` +
+      `(${escapeHtml(cur.triggered_by)}) ` +
+      `started ${fmtTime(cur.started_at)} — ` +
+      `<strong>${fmtDuration(cur.elapsed_secs)}</strong> elapsed`;
+    // Disable buttons while running
+    $('btnScanner').disabled = true;
+    $('btnMatcher').disabled = true;
+    $('btnScanMatch').disabled = true;
+  }
+
+  function renderRecent(rows) {
+    const host = $('orchRecent');
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-row">No runs recorded yet.</div>';
+      return;
+    }
+    host.innerHTML = rows.map(r => {
+      let badge;
+      if (r.finished_at == null) {
+        badge = '<span class="pill processing">running</span>';
+      } else if (r.succeeded) {
+        badge = '<span class="pill reviewed">ok</span>';
+      } else {
+        badge = '<span class="pill failed">failed</span>';
+      }
+      const elapsed = r.elapsed_secs != null ? fmtDuration(r.elapsed_secs) : '—';
+      let extra = '';
+      if (r.error) {
+        extra = `<div class="err" style="font-size:11px">${escapeHtml(r.error.split('\n')[0].slice(0, 200))}</div>`;
+      }
+      return `<div class="row" style="display:block">
+        <div style="display:flex; justify-content:space-between; gap:10px; align-items:center">
+          <span>${badge} <strong>${escapeHtml(r.kind)}</strong>
+                <span class="muted">${escapeHtml(r.triggered_by)}</span></span>
+          <span class="meta">${fmtTime(r.started_at)} · ${elapsed}</span>
+        </div>
+        ${extra}
+      </div>`;
+    }).join('');
+  }
+
+  function renderSchedule(s) {
+    if (!s) {
+      $('orchSchedule').innerHTML = '<em>—</em>';
+      return;
+    }
+    if (!s.enabled) {
+      $('orchSchedule').innerHTML =
+        '<span class="pill">disabled</span><br>' +
+        `<span class="muted" style="font-size:11px">Cron: ${escapeHtml(s.cron || '(empty)')}</span>`;
+      return;
+    }
+    let auto = '';
+    if (s.auto_delete_exact) {
+      auto += '<div class="muted" style="font-size:11px">+ auto-delete exact dupes</div>';
+    }
+    if (s.auto_delete_sim_threshold) {
+      auto += `<div class="muted" style="font-size:11px">+ auto-delete sim ≥ ${escapeHtml(s.auto_delete_sim_threshold)}</div>`;
+    }
+    $('orchSchedule').innerHTML =
+      `<div><strong>Cron:</strong> <code>${escapeHtml(s.cron)}</code> <span class="muted">(UTC)</span></div>` +
+      `<div><strong>Next run:</strong> ${fmtTime(s.next_run_at)}</div>` +
+      auto;
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/run/status', {cache: 'no-store'});
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      renderCurrent(data.current);
+      renderRecent(data.recent || []);
+      renderSchedule(data.schedule);
+    } catch (e) {
+      // Quiet failure -- next poll will retry
+    } finally {
+      setTimeout(refresh, POLL_MS);
+    }
+  }
+
+  async function trigger(endpoint, label) {
+    try {
+      const r = await fetch(endpoint, {method: 'POST'});
+      if (!r.ok) {
+        alert(`${label} failed: HTTP ${r.status}`);
+        return;
+      }
+      // Force an immediate refresh so the UI flips to "running" right away
+      refresh();
+    } catch (e) {
+      alert(`${label} failed: ${e}`);
+    }
+  }
+
+  $('btnScanner').addEventListener('click', () =>
+    trigger('/api/run/scanner', 'Scanner'));
+  $('btnMatcher').addEventListener('click', () =>
+    trigger('/api/run/matcher', 'Matcher'));
+  $('btnScanMatch').addEventListener('click', () =>
+    trigger('/api/run/scan_match', 'Scanner + matcher'));
+
+  refresh();
+})();
+</script>
+
+<h2>Duplicate groups</h2>
+
+<!-- Filename-match auto-delete. Cheap and aggressive: resolution-only diffs
+     are safe to auto-delete; scene/title differences should be reviewed. -->
+<div class="card" id="bulkFilenameCard" style="display:none">
+  <h3>Auto-delete by filename</h3>
+  <div class="muted" style="margin-bottom:12px">
+    Groups files whose normalized filenames are identical or share most
+    content tokens (same date, actor, scene, etc.). No GPU/IO -- runs in
+    seconds. Keeper picked by source priority, then highest resolution × bitrate.
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+    <form method="post" action="/api/run/filename_matcher" id="filenameRunForm"
+          style="display:inline">
+      <button type="submit">Run filename matcher</button>
+    </form>
+  </div>
+
+  <div id="filenameSummary" class="muted" style="margin-bottom:12px">Loading preview…</div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    <form method="post" action="/filename/auto_delete" class="filename-form" style="display:inline">
+      <input type="hidden" name="bucket" value="resolution_only">
+      <button type="submit" class="danger">Auto-delete resolution-only dupes</button>
+    </form>
+    <form method="post" action="/filename/auto_delete" class="filename-form" style="display:inline">
+      <input type="hidden" name="bucket" value="name_differs">
+      <button type="submit">Auto-delete name-differs dupes</button>
+    </form>
+    <form method="post" action="/filename/auto_delete" class="filename-form" style="display:inline">
+      <input type="hidden" name="bucket" value="all">
+      <button type="submit" class="danger">Auto-delete ALL filename matches</button>
+    </form>
+  </div>
+  <div class="muted" style="margin-top:8px; font-size:11px">
+    <strong>resolution_only</strong>: same content, just different resolution markers in filename. Safe.<br>
+    <strong>name_differs</strong>: titles share most tokens but aren't identical. Spot-check first.
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  function fmtBytes(b) {
+    const u = ['B','KB','MB','GB','TB'];
+    let f = +b, i = 0;
+    while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+    return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+  }
+
+  let lastSummary = {};
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/filename_preview', {cache: 'no-store'});
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      lastSummary = data;
+
+      const buckets = Object.entries(data);
+      const total = buckets.reduce((acc, [, v]) => acc + (+v.groups || 0), 0);
+      if (total === 0) {
+        $('filenameSummary').innerHTML =
+          '<em>No filename groups yet.</em> Click "Run filename matcher" to scan.';
+        // Still show the card so the run button is reachable.
+        $('bulkFilenameCard').style.display = '';
+        return;
+      }
+
+      const parts = [];
+      let totFiles = 0, totBytes = 0;
+      for (const [bucket, v] of buckets) {
+        const g = +v.groups || 0, f = +v.files_to_delete || 0, b = +v.bytes_to_free || 0;
+        totFiles += f; totBytes += b;
+        const label = bucket === 'resolution_only'
+          ? '<span class="pill reviewed">resolution_only</span>'
+          : bucket === 'name_differs'
+            ? '<span class="pill">name_differs</span>'
+            : `<span class="pill">${escapeHtml(bucket)}</span>`;
+        parts.push(`${label} ${g} groups, ${f} files (${fmtBytes(b)})`);
+      }
+      $('filenameSummary').innerHTML =
+        `<strong>${total}</strong> filename-match groups awaiting review, ` +
+        `<strong>${totFiles}</strong> files would be moved, ` +
+        `<strong>${fmtBytes(totBytes)}</strong> reclaimable.<br>` +
+        parts.join('; ');
+      $('bulkFilenameCard').style.display = '';
+    } catch (_) { /* fail silent */ }
+  }
+
+  // Wire up forms
+  document.querySelectorAll('form.filename-form').forEach(f => {
+    f.addEventListener('submit', e => {
+      const bucket = f.querySelector('input[name="bucket"]').value;
+      const stats = lastSummary[bucket] || {};
+      const g = +stats.groups || 0, files = +stats.files_to_delete || 0,
+            bytes = +stats.bytes_to_free || 0;
+      let msg;
+      if (bucket === 'all') {
+        // Use aggregated total
+        const totFiles = Object.values(lastSummary).reduce((a, v) => a + (+v.files_to_delete || 0), 0);
+        const totBytes = Object.values(lastSummary).reduce((a, v) => a + (+v.bytes_to_free || 0), 0);
+        msg = `This will move ${totFiles} files (${fmtBytes(totBytes)}) across ALL filename ` +
+              `match groups (both resolution_only AND name_differs).\n\n` +
+              `Files MOVED to .mediadedup-trash/, not deleted.\n\nProceed?`;
+      } else {
+        msg = `This will move ${files} files (${fmtBytes(bytes)}) from ${g} ` +
+              `${bucket} filename match groups.\n\nFiles MOVED to .mediadedup-trash/, not deleted.\n\nProceed?`;
+      }
+      if (!confirm(msg)) e.preventDefault();
+    });
+  });
+
+  // The "Run filename matcher" button uses an AJAX POST so we don't navigate away
+  $('filenameRunForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true; btn.textContent = 'Running…';
+    try {
+      const r = await fetch('/api/run/filename_matcher', {method: 'POST'});
+      if (!r.ok) throw new Error(r.status);
+      // Poll preview until it changes -- the matcher runs in background.
+      const interval = setInterval(refresh, 2000);
+      setTimeout(() => {
+        clearInterval(interval);
+        btn.disabled = false; btn.textContent = 'Run filename matcher';
+        refresh();
+      }, 30000);
+    } catch (err) {
+      alert('Run failed: ' + err);
+      btn.disabled = false; btn.textContent = 'Run filename matcher';
+    }
+  });
+
+  refresh();
+  setInterval(refresh, 10000);
+})();
+</script>
+
+
+<!-- LLM-based filename clustering: catches near-duplicates the deterministic
+     normalizer can't (different word order, abbreviations, different naming
+     schemes) by asking an Ollama-hosted model to group them. -->
+<div class="card" id="llmCard">
+  <div style="display:flex; justify-content:space-between; align-items:start; gap:12px; flex-wrap:wrap">
+    <div>
+      <h3 style="margin-top:0">LLM filename matcher</h3>
+      <div class="muted" style="margin-bottom:12px">
+        Second pass after the deterministic filename matcher. Sends filenames
+        the normalizer didn't cluster to a local LLM via Ollama. The LLM
+        identifies same-content files across naming-scheme differences,
+        word-order changes, and abbreviations.
+      </div>
+    </div>
+    <details>
+      <summary style="cursor:pointer; user-select:none">⚙ Settings &amp; status</summary>
+      <div id="llmSettingsPanel" style="margin-top:12px; min-width:340px;
+                                         padding:12px; border:1px solid var(--border-color, #2a2a2a);
+                                         border-radius:6px; background:rgba(255,255,255,0.02)">
+        <div id="llmStatus" class="muted" style="margin-bottom:10px">
+          Probing Ollama…
+        </div>
+        <form id="llmSettingsForm" style="display:grid; gap:8px;
+                                           grid-template-columns: max-content 1fr;
+                                           align-items:center; font-size:13px">
+          <label>Ollama URL:</label>
+          <input type="text" name="llm.ollama_url" id="set_url"
+                 placeholder="http://localhost:11434" style="width:100%">
+
+          <label>Model:</label>
+          <select name="llm.model" id="set_model" style="width:100%">
+            <option value="">(no models found)</option>
+          </select>
+
+          <label>Batch size:</label>
+          <input type="number" name="llm.batch_size" id="set_batch" min="5" max="200" style="width:100%">
+
+          <label>Bucket by:</label>
+          <select name="llm.bucket_by" id="set_bucket" style="width:100%">
+            <option value="parent_dir">parent directory</option>
+            <option value="grandparent_dir">grandparent directory</option>
+            <option value="all">all files (slow!)</option>
+          </select>
+
+          <label>Min bucket size:</label>
+          <input type="number" name="llm.min_bucket_size" id="set_min_bucket"
+                 min="2" max="50" style="width:100%">
+
+          <label>Max buckets/run:</label>
+          <input type="number" name="llm.max_buckets" id="set_max_buckets"
+                 min="10" max="10000" style="width:100%">
+
+          <label>Confidence ≥:</label>
+          <input type="number" name="llm.confidence_threshold" id="set_conf"
+                 min="0" max="1" step="0.01" style="width:100%">
+
+          <label>Timeout (s):</label>
+          <input type="number" name="llm.timeout_seconds" id="set_timeout"
+                 min="10" max="600" style="width:100%">
+
+          <div></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap">
+            <button type="submit" class="primary">Save settings</button>
+            <button type="button" id="llmTestBtn">Test connection</button>
+          </div>
+        </form>
+        <div style="margin-top:12px; font-size:11px" class="muted">
+          Recent calls: <a href="#" id="llmRecentLink">scroll to activity log ↓</a>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+    <button type="button" id="runLlmBtn" class="primary">Run LLM matcher</button>
+    <span id="runLlmStatus" class="muted" style="align-self:center"></span>
+  </div>
+
+  <div id="llmPreview" class="muted" style="margin-bottom:12px">No LLM groups yet.</div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+    <label style="display:flex; align-items:center; gap:8px">
+      Auto-delete at confidence ≥
+      <input type="range" id="llmConfSlider" min="0.70" max="1.00" step="0.01" value="0.85"
+             style="width:160px">
+      <span id="llmConfLabel" style="font-variant-numeric: tabular-nums; font-weight:600;
+                                      min-width:3.5em; display:inline-block">0.85</span>
+    </label>
+    <form method="post" action="/llm/auto_delete" id="llmDeleteForm" style="display:inline">
+      <input type="hidden" name="min_confidence" id="llmConfInput" value="0.85">
+      <button type="submit" class="danger">Auto-delete LLM matches</button>
+    </form>
+  </div>
+
+  <!-- Run progress + recent activity. Renders below the controls so it's
+       visible without expanding the settings panel. -->
+  <div id="llmProgressBlock" style="margin-top:18px; display:none">
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px">
+      <span class="pill reviewed" id="llmRunBadge">running</span>
+      <strong id="llmRunTitle">LLM matcher running</strong>
+      <span class="muted" id="llmRunTiming">starting…</span>
+    </div>
+    <div id="llmProgressBar" style="height:8px; background:rgba(255,255,255,0.06);
+         border-radius:4px; overflow:hidden; margin-bottom:8px">
+      <!-- Indeterminate striped bar (no fixed total). Animated via CSS below. -->
+      <div id="llmProgressFill" style="height:100%; width:0%; background:#3b82f6;
+           transition:width 250ms ease"></div>
+    </div>
+    <div class="muted" id="llmProgressDetail" style="font-size:12px"></div>
+  </div>
+
+  <div style="margin-top:16px; display:grid; gap:16px; grid-template-columns: 1fr 1fr">
+    <div>
+      <h4 style="margin:0 0 8px">Recent LLM calls
+        <span class="muted" style="font-weight:normal; font-size:12px"
+              id="llmCallsTotal"></span>
+      </h4>
+      <div id="llmCallsList" class="activity-list">
+        <div class="empty-row">No LLM calls yet.</div>
+      </div>
+    </div>
+    <div>
+      <h4 style="margin:0 0 8px">Run summary</h4>
+      <div id="llmRunSummary" class="muted" style="font-size:13px; line-height:1.55">
+        Click "Run LLM matcher" to start clustering unmatched files.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  function fmtBytes(b) {
+    const u = ['B','KB','MB','GB','TB'];
+    let f = +b, i = 0;
+    while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+    return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+  }
+
+  // -------- settings load + save --------
+  async function loadSettings() {
+    try {
+      const r = await fetch('/api/settings?prefix=llm.', {cache: 'no-store'});
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      const s = data.settings || {};
+      $('set_url').value = s['llm.ollama_url'] || '';
+      $('set_batch').value = s['llm.batch_size'] || '30';
+      $('set_bucket').value = s['llm.bucket_by'] || 'parent_dir';
+      $('set_min_bucket').value = s['llm.min_bucket_size'] || '2';
+      $('set_max_buckets').value = s['llm.max_buckets'] || '200';
+      $('set_conf').value = s['llm.confidence_threshold'] || '0.80';
+      $('set_timeout').value = s['llm.timeout_seconds'] || '120';
+      // Remember selected model so we can re-select after probing returns names
+      $('set_model').dataset.preselected = s['llm.model'] || '';
+    } catch (e) {
+      $('llmStatus').textContent = 'Failed to load settings: ' + e;
+    }
+    await probeOllama();
+  }
+
+  async function probeOllama() {
+    $('llmStatus').textContent = 'Probing Ollama…';
+    // Use the URL currently in the form, not the saved setting. That way
+    // "Test connection" works on a URL the user is typing without requiring
+    // a save first. Falls back to saved value on empty.
+    const formUrl = ($('set_url').value || '').trim();
+    const q = formUrl ? '?url=' + encodeURIComponent(formUrl) : '';
+    try {
+      const r = await fetch('/api/llm/test' + q, {cache: 'no-store'});
+      if (!r.ok) {
+        $('llmStatus').innerHTML =
+          `<span class="pill failed">probe HTTP ${r.status}</span> ` +
+          escapeHtml(await r.text().catch(() => ''));
+        return;
+      }
+      const data = await r.json();
+      const sel = $('set_model');
+      const want = sel.dataset.preselected || sel.value || '';
+      sel.innerHTML = '';
+      if (data.reachable && (data.available_models || []).length) {
+        for (const name of data.available_models) {
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name;
+          if (name === want) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        // If the preselected model isn't actually installed, add it as a hint
+        if (want && !data.available_models.includes(want)) {
+          const opt = document.createElement('option');
+          opt.value = want; opt.textContent = want + ' (not installed)';
+          opt.selected = true; sel.prepend(opt);
+        }
+        $('llmStatus').innerHTML =
+          `<span class="pill reviewed">connected</span> ` +
+          `${data.available_models.length} model(s) available at <code>${escapeHtml(data.url || formUrl)}</code>`;
+      } else if (data.reachable) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(no models found, ollama pull <name> first)';
+        sel.appendChild(opt);
+        $('llmStatus').innerHTML =
+          `<span class="pill">connected</span> ` +
+          `<span class="muted">but no models installed at <code>${escapeHtml(data.url || formUrl)}</code></span>`;
+      } else {
+        const opt = document.createElement('option');
+        opt.value = want; opt.textContent = want || '(connection failed)';
+        sel.appendChild(opt);
+        $('llmStatus').innerHTML =
+          `<span class="pill failed">unreachable</span> ` +
+          `<code>${escapeHtml(data.url || formUrl)}</code> &mdash; ${escapeHtml(data.error || '')}`;
+      }
+    } catch (e) {
+      $('llmStatus').innerHTML =
+        `<span class="pill failed">probe error</span> ${escapeHtml(e + '')}`;
+    }
+  }
+
+  $('llmSettingsForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('llmStatus').textContent = 'Saving…';
+    const fd = new FormData(e.target);
+    // Capture the URL + model we're SAVING so the subsequent probe knows
+    // what to re-select. Otherwise probe will rebuild the dropdown and
+    // lose the user's selection.
+    const savedModel = String(fd.get('llm.model') || '');
+    try {
+      const r = await fetch('/api/settings', {method: 'POST', body: fd});
+      const body = await r.text();
+      if (!r.ok) {
+        $('llmStatus').innerHTML =
+          `<span class="pill failed">save failed</span> HTTP ${r.status} ${escapeHtml(body)}`;
+        return;
+      }
+      // Remember the model the user just saved so probeOllama can re-select
+      // it after rebuilding the dropdown.
+      $('set_model').dataset.preselected = savedModel;
+      $('llmStatus').innerHTML =
+        `<span class="pill reviewed">saved</span> probing new endpoint…`;
+      setTimeout(probeOllama, 200);
+    } catch (err) {
+      $('llmStatus').innerHTML =
+        `<span class="pill failed">save error</span> ${escapeHtml(err + '')}`;
+    }
+  });
+
+  $('llmTestBtn').addEventListener('click', probeOllama);
+
+  // -------- preview + auto-delete --------
+  let lastPreview = {groups: 0, files_to_delete: 0, bytes_to_free: 0, avg_confidence: 0};
+
+  async function refreshPreview() {
+    try {
+      const r = await fetch('/api/llm_preview', {cache: 'no-store'});
+      const data = await r.json();
+      lastPreview = data;
+      if (data.groups === 0) {
+        $('llmPreview').innerHTML =
+          '<em>No LLM groups yet.</em> Click "Run LLM matcher" to scan unmatched files.';
+      } else {
+        $('llmPreview').innerHTML =
+          `<strong>${data.groups}</strong> LLM groups awaiting review, ` +
+          `<strong>${data.files_to_delete}</strong> files would be moved, ` +
+          `<strong>${fmtBytes(data.bytes_to_free)}</strong> reclaimable. ` +
+          `Average LLM confidence: ${data.avg_confidence.toFixed(2)}.`;
+      }
+    } catch (_) { /* fail silent */ }
+  }
+
+  // Slider for delete-confidence threshold
+  $('llmConfSlider').addEventListener('input', e => {
+    const v = parseFloat(e.target.value).toFixed(2);
+    $('llmConfLabel').textContent = v;
+    $('llmConfInput').value = v;
+  });
+
+  $('llmDeleteForm').addEventListener('submit', e => {
+    const thresh = parseFloat($('llmConfInput').value);
+    const ok = confirm(
+      `Auto-delete LLM matches with confidence ≥ ${thresh.toFixed(2)}?\n\n` +
+      `Up to ${lastPreview.files_to_delete} files (${fmtBytes(lastPreview.bytes_to_free)}) ` +
+      `may be moved to .mediadedup-trash/.\n\nProceed?`
+    );
+    if (!ok) e.preventDefault();
+  });
+
+  // -------- run button --------
+  $('runLlmBtn').addEventListener('click', async () => {
+    const btn = $('runLlmBtn');
+    btn.disabled = true; btn.textContent = 'Running…';
+    $('runLlmStatus').textContent = 'started; this may take several minutes';
+    try {
+      const r = await fetch('/api/run/llm_matcher', {method: 'POST'});
+      if (!r.ok) throw new Error(r.status);
+      // The orchestrator card will reflect progress; just re-enable after a while
+      const interval = setInterval(refreshPreview, 3000);
+      setTimeout(() => {
+        clearInterval(interval);
+        btn.disabled = false; btn.textContent = 'Run LLM matcher';
+        $('runLlmStatus').textContent = '';
+        refreshPreview();
+      }, 120000);
+    } catch (e) {
+      alert('Failed: ' + e);
+      btn.disabled = false; btn.textContent = 'Run LLM matcher';
+      $('runLlmStatus').textContent = '';
+    }
+  });
+
+  // -------- Progress + recent calls (inline, no popup) --------
+  // The settings panel's "view log" link now just scrolls down to the inline
+  // tile instead of opening an alert dialog.
+  $('llmRecentLink').addEventListener('click', e => {
+    e.preventDefault();
+    $('llmCallsList').scrollIntoView({behavior: 'smooth', block: 'center'});
+  });
+
+  function fmtElapsed(s) {
+    if (s == null || isNaN(s)) return '—';
+    s = Math.floor(+s);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    if (m < 60) return m + 'm' + String(rem).padStart(2, '0') + 's';
+    const h = Math.floor(m / 60);
+    return h + 'h' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  function fmtRelTime(iso) {
+    if (!iso) return '—';
+    const dt = new Date(iso);
+    const s = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    return Math.floor(s / 3600) + 'h ago';
+  }
+
+  function shortBucket(path) {
+    if (!path) return '—';
+    // Show the last two path components so the bucket key is recognizable
+    // without taking three lines.
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length <= 2) return '/' + parts.join('/');
+    return '…/' + parts.slice(-2).join('/');
+  }
+
+  let progressStaleTicks = 0;
+
+  async function refreshLlmProgress() {
+    let progress = null;
+    try {
+      const r = await fetch('/api/llm/progress', {cache: 'no-store'});
+      if (r.ok) progress = await r.json();
+    } catch (_) { /* ignore */ }
+
+    if (progress && progress.running) {
+      $('llmProgressBlock').style.display = '';
+      $('llmRunBadge').className = 'pill reviewed';
+      $('llmRunBadge').textContent = 'running';
+      $('llmRunTitle').textContent = 'LLM matcher running';
+      $('llmRunTiming').textContent =
+        `elapsed ${fmtElapsed(progress.run_elapsed_s)} · ` +
+        `${progress.calls_during_run} call(s) so far`;
+
+      // Indeterminate progress bar: use modulo of calls to show motion.
+      // Width oscillates 10–95% based on call count; the user gets a sense
+      // of forward progress without us pretending to know the denominator.
+      const calls = progress.calls_during_run || 0;
+      const pct = 10 + (calls * 7) % 85;
+      $('llmProgressFill').style.width = pct + '%';
+
+      const last = progress.last_call || {};
+      const since = progress.seconds_since_last_call || 0;
+      const stale = since > 60;
+      progressStaleTicks = stale ? progressStaleTicks + 1 : 0;
+
+      let detail =
+        `<strong>Files seen this run:</strong> ${progress.files_seen_during_run} · ` +
+        `<strong>Avg call:</strong> ${fmtElapsed((progress.avg_call_ms || 0) / 1000)} · ` +
+        `<strong>Last activity:</strong> ${fmtElapsed(since)} ago`;
+      if (stale) {
+        detail += ` <span style="color:var(--warn,#f0a)">(stalled?)</span>`;
+      }
+      if (last.bucket_key) {
+        detail += `<br><span class="muted">Last bucket: <code>${escapeHtml(shortBucket(last.bucket_key))}</code> (${last.n_files} files, ` +
+                  `${last.groups_found != null ? last.groups_found + ' groups' : 'parse error'})</span>`;
+      }
+      $('llmProgressDetail').innerHTML = detail;
+    } else {
+      // Not running. If we just finished, leave the block visible with
+      // final stats; otherwise hide.
+      if (progress && progress.calls_total > 0) {
+        $('llmProgressBlock').style.display = '';
+        $('llmRunBadge').className = 'pill';
+        $('llmRunBadge').textContent = 'idle';
+        $('llmRunTitle').textContent = 'LLM matcher idle';
+        $('llmRunTiming').textContent = '';
+        $('llmProgressFill').style.width = '0%';
+        $('llmProgressDetail').innerHTML =
+          `<span class="muted">${progress.calls_total} total calls logged, ` +
+          `${progress.groups_landed} group(s) currently in dup_groups.</span>`;
+      } else {
+        $('llmProgressBlock').style.display = 'none';
+      }
+    }
+
+    if (progress) {
+      $('llmRunSummary').innerHTML =
+        `<strong>${progress.groups_landed || 0}</strong> LLM groups in database ` +
+        `covering <strong>${progress.members_landed || 0}</strong> files.<br>` +
+        `<strong>${progress.calls_total}</strong> total Ollama calls logged ` +
+        `(${progress.calls_during_run} in current run).<br>` +
+        (progress.avg_call_ms
+            ? `Average call latency: <strong>${fmtElapsed(progress.avg_call_ms / 1000)}</strong>.`
+            : '');
+    }
+  }
+
+  function renderCallsList(rows) {
+    const host = $('llmCallsList');
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-row">No LLM calls yet.</div>';
+      return;
+    }
+    host.innerHTML = rows.map(c => {
+      const ok = !c.error;
+      const icon = ok
+        ? (c.groups_found > 0 ? '✓' : c.response_state === 'ok' ? '◌' : '⚠')
+        : '⚠';
+      let badge;
+      if (c.groups_found != null && c.groups_found > 0) {
+        badge = `<span class="pill reviewed">${c.groups_found}g / ${c.members_found}f</span>`;
+      } else if (c.response_state === 'ok') {
+        badge = '<span class="muted">no groups</span>';
+      } else if (c.response_state === 'empty') {
+        badge = '<span class="pill failed">empty</span>';
+      } else if (c.response_state === 'unparseable') {
+        badge = '<span class="pill failed">parse err</span>';
+      } else {
+        badge = '<span class="pill failed">error</span>';
+      }
+      const errFrag = c.error
+        ? `<div class="err" style="font-size:11px">${escapeHtml(String(c.error).slice(0, 180))}</div>`
+        : '';
+      // Tooltip shows the raw response preview so the user can debug without
+      // dropping to SQL.
+      const tipBits = [c.bucket_key || ''];
+      if (c.response_preview) tipBits.push('Response: ' + c.response_preview);
+      const tip = tipBits.join('\n\n');
+      return `<div class="row" style="display:block" title="${escapeHtml(tip)}">
+        <div style="display:flex; gap:8px; align-items:center">
+          <span style="width:1em">${icon}</span>
+          <span class="name">${escapeHtml(shortBucket(c.bucket_key))}</span>
+          ${badge}
+          <span class="meta" style="margin-left:auto">${c.n_files}f · ${fmtElapsed(c.elapsed_ms / 1000)} · ${fmtRelTime(c.created_at)}</span>
+        </div>
+        ${errFrag}
+      </div>`;
+    }).join('');
+  }
+
+  async function refreshLlmCalls() {
+    try {
+      const r = await fetch('/api/llm/recent_calls?limit=15', {cache: 'no-store'});
+      if (!r.ok) return;
+      const data = await r.json();
+      $('llmCallsTotal').textContent =
+        data.calls && data.calls.length ? `(${data.calls.length} shown)` : '';
+      renderCallsList(data.calls || []);
+    } catch (_) { /* ignore */ }
+  }
+
+  async function tickLlmActivity() {
+    // Run both in parallel so the UI feels live
+    await Promise.all([refreshLlmProgress(), refreshLlmCalls()]);
+  }
+
+  loadSettings();
+  refreshPreview();
+  tickLlmActivity();
+  setInterval(refreshPreview, 10000);
+  setInterval(tickLlmActivity, 3000);
+})();
+</script>
+
+
+<h2>Existing duplicate groups</h2>
+
+<!-- Bulk auto-delete for exact matches. Only safe path to automate; perceptual
+     and chromaprint groups still require manual review. -->
+<div class="card" id="bulkExactCard" style="display:none">
+  <h3>Auto-delete exact (sha256) duplicates</h3>
+  <div class="muted" style="margin-bottom:12px">
+    Files with identical bytes are unambiguous duplicates -- one keeper, the rest moved to trash.
+    The keeper is the file with the longest path (most descriptive location), with size as a tiebreaker.
+    Files are MOVED to <code>.mediadedup-trash/</code>; nothing is unlinked.
+  </div>
+  <div id="bulkPreviewSummary" class="muted" style="margin-bottom:12px"></div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    <form method="post" action="/exact/auto_delete" class="bulk-form" style="display:inline">
+      <button type="submit" class="danger">Delete all exact dupes</button>
+    </form>
+    <form method="post" action="/exact/auto_delete" class="bulk-form" style="display:inline">
+      <input type="hidden" name="media_type" value="video">
+      <button type="submit">Video only</button>
+    </form>
+    <form method="post" action="/exact/auto_delete" class="bulk-form" style="display:inline">
+      <input type="hidden" name="media_type" value="audio">
+      <button type="submit">Audio only</button>
+    </form>
+  </div>
+</div>
+
+<!-- Similarity-threshold auto-delete. For perceptual + chromaprint matches,
+     above some confidence cutoff the call is reliable enough to automate. -->
+<div class="card" id="bulkSimCard" style="display:none">
+  <h3>Auto-delete similarity matches above a threshold</h3>
+  <div class="muted" style="margin-bottom:12px">
+    For perceptual (video) and chromaprint (audio) groups, deletes everything
+    above the chosen similarity score. Picks the highest-quality file as
+    keeper: highest <strong>resolution × bitrate</strong> for video, highest
+    <strong>bitrate × size</strong> for audio. Files are MOVED to <code>.mediadedup-trash/</code>.
+  </div>
+
+  <div style="display:flex; align-items:center; gap:16px; margin-bottom:12px; flex-wrap:wrap">
+    <label style="display:flex; align-items:center; gap:8px">
+      Threshold:
+      <input type="range" id="simThresh" min="0.85" max="1.00" step="0.01" value="0.98"
+             style="width:240px">
+      <span id="simThreshLabel" style="font-variant-numeric: tabular-nums; font-weight:600;
+                                       min-width:3.5em; display:inline-block">0.98</span>
+    </label>
+    <span class="muted">higher = stricter (1.00 ≈ exact); 0.95 typical for confident dupes</span>
+  </div>
+
+  <div id="bulkSimSummary" class="muted" style="margin-bottom:12px">Loading preview…</div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap">
+    <form method="post" action="/similarity/auto_delete" class="sim-form" style="display:inline">
+      <input type="hidden" name="threshold" class="sim-threshold-input" value="0.98">
+      <button type="submit" class="danger">Delete all above threshold</button>
+    </form>
+    <form method="post" action="/similarity/auto_delete" class="sim-form" style="display:inline">
+      <input type="hidden" name="threshold" class="sim-threshold-input" value="0.98">
+      <input type="hidden" name="media_type" value="video">
+      <input type="hidden" name="match_types" value="perceptual">
+      <button type="submit">Video (perceptual) only</button>
+    </form>
+    <form method="post" action="/similarity/auto_delete" class="sim-form" style="display:inline">
+      <input type="hidden" name="threshold" class="sim-threshold-input" value="0.98">
+      <input type="hidden" name="media_type" value="audio">
+      <input type="hidden" name="match_types" value="chromaprint">
+      <button type="submit">Audio (chromaprint) only</button>
+    </form>
+  </div>
+</div>
+
+<script>
+(async function () {
+  // Only show the card if there's actually something to do.
+  try {
+    const r = await fetch('/api/exact_preview');
+    if (!r.ok) return;
+    const data = await r.json();
+    let groups = 0, files = 0, bytes = 0;
+    const lines = [];
+    for (const [mt, row] of Object.entries(data)) {
+      const g = +row.groups || 0, f = +row.files_to_delete || 0, b = +row.bytes_to_free || 0;
+      groups += g; files += f; bytes += b;
+      lines.push(`${mt}: ${g} groups, ${f} files (${formatBytes(b)})`);
+    }
+    if (groups === 0) return;
+
+    document.getElementById('bulkExactCard').style.display = '';
+    document.getElementById('bulkPreviewSummary').innerHTML =
+      `<strong>${groups}</strong> exact-match groups awaiting review, ` +
+      `<strong>${files}</strong> files would be moved, ` +
+      `<strong>${formatBytes(bytes)}</strong> reclaimable.<br>` +
+      `Breakdown: ${lines.join('; ')}.`;
+
+    // Confirm before submitting any of the bulk forms.
+    document.querySelectorAll('form.bulk-form').forEach(f => {
+      f.addEventListener('submit', e => {
+        const scope = f.querySelector('input[name="media_type"]')?.value || 'all';
+        const ok = confirm(
+          `This will move ${files} files (${formatBytes(bytes)}) to .mediadedup-trash/.\n\n` +
+          `Scope: ${scope}\n\n` +
+          `Files are MOVED, not deleted. You can recover them from the trash directory.\n\n` +
+          `Proceed?`
+        );
+        if (!ok) e.preventDefault();
+      });
+    });
+  } catch (_) { /* fail silent — card just stays hidden */ }
+
+  function formatBytes(b) {
+    const u = ['B','KB','MB','GB','TB'];
+    let f = +b, i = 0;
+    while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+    return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+  }
+  // Expose for the second IIFE.
+  window._fmtBytes = formatBytes;
+})();
+
+(function () {
+  const slider = document.getElementById('simThresh');
+  const label = document.getElementById('simThreshLabel');
+  const summary = document.getElementById('bulkSimSummary');
+  const card = document.getElementById('bulkSimCard');
+  const fmtBytes = (b) => {
+    const u = ['B','KB','MB','GB','TB'];
+    let f = +b, i = 0;
+    while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+    return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+  };
+
+  let lastFiles = 0, lastBytes = 0, lastThresh = 0.98;
+
+  // Debounced preview fetch — slider drag fires a lot, throttle DB hits.
+  let timer;
+  function refreshPreview() {
+    clearTimeout(timer);
+    timer = setTimeout(doFetch, 200);
+  }
+
+  async function doFetch() {
+    const t = parseFloat(slider.value);
+    label.textContent = t.toFixed(2);
+    lastThresh = t;
+    document.querySelectorAll('.sim-threshold-input').forEach(i => i.value = t.toFixed(2));
+
+    summary.textContent = 'Loading preview…';
+    try {
+      const r = await fetch(`/api/similarity_preview?threshold=${t}`);
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+
+      let groups = 0, files = 0, bytes = 0;
+      const breakdown = [];
+      for (const [k, row] of Object.entries(data)) {
+        const g = +row.groups || 0, f = +row.files_to_delete || 0, b = +row.bytes_to_free || 0;
+        groups += g; files += f; bytes += b;
+        const [mt, match] = k.split(':');
+        breakdown.push(`${mt} ${match}: ${g} groups, ${f} files (${fmtBytes(b)})`);
+      }
+      lastFiles = files; lastBytes = bytes;
+
+      if (groups === 0) {
+        summary.innerHTML =
+          `<em>No groups at threshold ≥ ${t.toFixed(2)}.</em> ` +
+          `Lower the threshold or run the matcher first.`;
+        return;
+      }
+      // Show the card the first time we have a real number.
+      card.style.display = '';
+      summary.innerHTML =
+        `At threshold ≥ <strong>${t.toFixed(2)}</strong>: ` +
+        `<strong>${groups}</strong> groups, ` +
+        `<strong>${files}</strong> files would be moved, ` +
+        `<strong>${fmtBytes(bytes)}</strong> reclaimable.<br>` +
+        breakdown.map(b => `<span class="muted">${b}</span>`).join('; ');
+    } catch (e) {
+      summary.textContent = 'Preview failed: ' + e;
+    }
+  }
+
+  slider.addEventListener('input', refreshPreview);
+
+  document.querySelectorAll('form.sim-form').forEach(f => {
+    f.addEventListener('submit', e => {
+      let scope = 'all similarity types';
+      const mt = f.querySelector('input[name="media_type"]')?.value;
+      const matches = f.querySelector('input[name="match_types"]')?.value;
+      if (mt || matches) scope = `${mt || 'both'} / ${matches || 'all match types'}`;
+      const ok = confirm(
+        `This will move ${lastFiles} files (${fmtBytes(lastBytes)}) to .mediadedup-trash/.\n\n` +
+        `Scope: ${scope}\n` +
+        `Threshold: ≥ ${lastThresh.toFixed(2)}\n\n` +
+        `Files are MOVED, not deleted. You can recover them from the trash directory.\n\n` +
+        `Proceed?`
+      );
+      if (!ok) e.preventDefault();
+    });
+  });
+
+  // Initial load — show or hide the card depending on whether anything exists.
+  // We unhide inside doFetch only if groups > 0, but show card immediately so
+  // the user can adjust the slider even if their first pick has 0 results.
+  card.style.display = '';
+  doFetch();
+})();
+</script>
+
+{% if group_stats %}
+<table>
+  <thead><tr><th>Type</th><th>Match</th><th>Groups</th><th>Members</th><th></th></tr></thead>
+  <tbody>
+  {% for r in group_stats %}
+    <tr>
+      <td><span class="pill {{ r.media_type }}">{{ r.media_type }}</span></td>
+      <td><span class="pill {{ r.match_type }}">{{ r.match_type }}</span></td>
+      <td>{{ r.groups }}</td>
+      <td>{{ r.members }}</td>
+      <td><a href="/groups?type={{ r.media_type }}&match={{ r.match_type }}">view →</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card empty">
+  No duplicate groups yet. Run <code>docker compose --profile tools run --rm scanner</code>,
+  wait for workers to finish (watch above), then
+  <code>docker compose --profile tools run --rm matcher</code>.
+</div>
+{% endif %}
+
+<script>
+(function () {
+  const POLL_MS = 3000;
+  const STALE_MS = POLL_MS * 3;
+  const SLOW_THRESHOLD_S = 600;   // highlight files in flight > 10 min in orange
+
+  const $ = (id) => document.getElementById(id);
+  const fmt = {
+    bytes(b) {
+      if (b == null) return '—';
+      const u = ['B','KB','MB','GB','TB'];
+      let f = +b, i = 0;
+      while (f >= 1024 && i < u.length - 1) { f /= 1024; i++; }
+      return (i === 0 ? f.toFixed(0) : f.toFixed(1)) + ' ' + u[i];
+    },
+    duration(s) {
+      if (s == null) return '—';
+      s = Math.round(s);
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      return h ? `${h}h${String(m).padStart(2,'0')}m`
+               : m ? `${m}m${String(sec).padStart(2,'0')}s`
+                   : `${sec}s`;
+    },
+    eta(remaining, perMin) {
+      if (!perMin || perMin <= 0 || !remaining) return '—';
+      return fmt.duration(remaining / perMin * 60);
+    },
+  };
+
+  function setLive(state) {
+    const dot = $('liveDot'), lbl = $('liveLabel');
+    dot.classList.remove('stale', 'dead');
+    if (state === 'ok')        { lbl.textContent = 'live'; }
+    else if (state === 'stale'){ dot.classList.add('stale'); lbl.textContent = 'lagging…'; }
+    else                       { dot.classList.add('dead');  lbl.textContent = 'disconnected'; }
+  }
+
+  function renderInFlight(rows) {
+    const host = $('inflight');
+    $('inflightCount').textContent = rows.length;
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-row">No files currently being processed.</div>';
+      return;
+    }
+    host.innerHTML = rows.map(r => {
+      const slow = r.elapsed_s != null && r.elapsed_s > SLOW_THRESHOLD_S;
+      const icon = r.media_type === 'video' ? '🎬' : '🎵';
+      const elapsed = r.elapsed_s != null ? fmt.duration(r.elapsed_s) : '—';
+      return `<div class="inflight-row${slow ? ' warn' : ''}" title="${escapeAttr(r.path)}">
+        <div class="icon">${icon}</div>
+        <div class="name">${escapeHtml(r.name)}</div>
+        <div class="meta">${fmt.bytes(r.size)}</div>
+        <div class="meta">attempt ${r.attempts}</div>
+        <div class="elapsed">${elapsed}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderRecentDone(rows) {
+    const host = $('recentDone');
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-row">Nothing finished yet.</div>';
+      return;
+    }
+    host.innerHTML = rows.map(r => {
+      const icon = r.media_type === 'video' ? '🎬' : '🎵';
+      const took = r.took_s != null ? fmt.duration(r.took_s) : '—';
+      return `<div class="row">
+        <span class="name">${icon} ${escapeHtml(r.name)}</span>
+        <span class="meta">${fmt.bytes(r.size)} · ${took}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function renderRecentFailed(rows) {
+    const host = $('recentFailed');
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-row">No failures.</div>';
+      return;
+    }
+    host.innerHTML = rows.map(r => {
+      const icon = r.media_type === 'video' ? '🎬' : '🎵';
+      return `<div class="row" style="display:block">
+        <div><span class="name">${icon} ${escapeHtml(r.name)}</span></div>
+        <div class="err">${escapeHtml(r.error || '(no error message)')}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderStatus(by_status, throughput) {
+    function setOne(prefix, s) {
+      const tracked = (s.pending||0) + (s.processing||0) + (s.done||0) + (s.failed||0);
+      $(prefix + 'Tracked').textContent = tracked.toLocaleString();
+      $(prefix + 'Done').textContent = (s.done||0).toLocaleString();
+      $(prefix + 'Pending').textContent = (s.pending||0).toLocaleString();
+      $(prefix + 'Processing').textContent = (s.processing||0).toLocaleString();
+      $(prefix + 'Failed').textContent = (s.failed||0).toLocaleString();
+      const finished = (s.done||0) + (s.failed||0);
+      const pct = tracked > 0 ? (finished / tracked * 100) : 0;
+      $(prefix + 'Bar').style.width = pct.toFixed(1) + '%';
+    }
+    setOne('v', by_status.video || {});
+    setOne('a', by_status.audio || {});
+
+    $('tpFilesPerMin').textContent = throughput.files_per_min ?? 0;
+    $('tpMbPerSec').textContent = throughput.mb_per_sec ?? 0;
+
+    // ETA = (remaining pending+processing) / files_per_min
+    const remaining = (by_status.video?.pending||0) + (by_status.video?.processing||0) +
+                      (by_status.audio?.pending||0) + (by_status.audio?.processing||0);
+    $('tpEta').textContent = fmt.eta(remaining, throughput.files_per_min);
+  }
+
+  function renderQueue(q) {
+    $('qQueued').textContent = (q.queued||0).toLocaleString();
+    $('qStarted').textContent = (q.started||0).toLocaleString();
+    $('qFailed').textContent = (q.failed||0).toLocaleString();
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+    ));
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+
+  let lastOk = 0;
+  let staleTimer = null;
+  function checkStale() {
+    if (Date.now() - lastOk > STALE_MS) setLive('stale');
+  }
+
+  async function tick() {
+    try {
+      const r = await fetch('/api/activity', {cache: 'no-store'});
+      if (!r.ok) throw new Error(r.status);
+      const data = await r.json();
+      lastOk = Date.now();
+      setLive('ok');
+      renderInFlight(data.in_flight || []);
+      renderRecentDone(data.recent_done || []);
+      renderRecentFailed(data.recent_failed || []);
+      renderStatus(data.by_status || {}, data.throughput || {});
+      renderQueue(data.queue || {});
+    } catch (e) {
+      if (Date.now() - lastOk > STALE_MS * 2) setLive('dead');
+      else setLive('stale');
+    } finally {
+      setTimeout(tick, POLL_MS);
+    }
+  }
+
+  tick();
+  setInterval(checkStale, 1000);
+})();
+</script>
+
+{% endblock %}

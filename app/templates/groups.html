@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Groups — Media Dedup{% endblock %}
+
+{% block content %}
+<form class="filters" method="get" action="/groups">
+  <label>Media:
+    <select name="type">
+      <option value="">all</option>
+      <option value="video" {% if filters.type == "video" %}selected{% endif %}>video</option>
+      <option value="audio" {% if filters.type == "audio" %}selected{% endif %}>audio</option>
+    </select>
+  </label>
+  <label>Match:
+    <select name="match">
+      <option value="">all</option>
+      <option value="exact" {% if filters.match == "exact" %}selected{% endif %}>exact (sha256)</option>
+      <option value="perceptual" {% if filters.match == "perceptual" %}selected{% endif %}>perceptual (video)</option>
+      <option value="chromaprint" {% if filters.match == "chromaprint" %}selected{% endif %}>chromaprint (audio)</option>
+    </select>
+  </label>
+  <label>Reviewed:
+    <select name="reviewed">
+      <option value="">all</option>
+      <option value="no" {% if filters.reviewed == "no" %}selected{% endif %}>no</option>
+      <option value="yes" {% if filters.reviewed == "yes" %}selected{% endif %}>yes</option>
+    </select>
+  </label>
+  <button type="submit" class="primary">Filter</button>
+  <span class="muted">{{ total }} groups</span>
+</form>
+
+{% if groups %}
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Type</th>
+      <th>Match</th>
+      <th>Sim.</th>
+      <th>Members</th>
+      <th>Total size</th>
+      <th>Reclaimable</th>
+      <th>Reviewed</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in groups %}
+    <tr>
+      <td>{{ g.id }}</td>
+      <td><span class="pill {{ g.media_type }}">{{ g.media_type }}</span></td>
+      <td><span class="pill {{ g.match_type }}">{{ g.match_type }}</span></td>
+      <td>{{ "%.2f"|format(g.similarity or 0) }}</td>
+      <td>{{ g.n_members }}</td>
+      <td>{{ g.total_size | bytes }}</td>
+      <td>{{ (g.total_size - (g.keeper_size or 0)) | bytes }}</td>
+      <td>{% if g.reviewed %}<span class="pill reviewed">yes</span>{% else %}—{% endif %}</td>
+      <td><a href="/groups/{{ g.id }}">open →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% set last_page = ((total - 1) // per_page) + 1 if total else 1 %}
+<div class="pagination">
+  {% if page > 1 %}<a class="btn" href="?type={{ filters.type or '' }}&match={{ filters.match or '' }}&reviewed={{ filters.reviewed or '' }}&page={{ page - 1 }}">← prev</a>{% endif %}
+  <span class="muted">page {{ page }} / {{ last_page }}</span>
+  {% if page < last_page %}<a class="btn" href="?type={{ filters.type or '' }}&match={{ filters.match or '' }}&reviewed={{ filters.reviewed or '' }}&page={{ page + 1 }}">next →</a>{% endif %}
+</div>
+
+{% else %}
+<div class="card empty">No groups match your filters.</div>
+{% endif %}
+
+{% endblock %}

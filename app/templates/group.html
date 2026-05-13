@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Group #{{ group.id }} — Media Dedup{% endblock %}
+
+{% block content %}
+<a href="/groups" class="muted">← back to groups</a>
+
+<h2 style="margin-top:12px">
+  Group #{{ group.id }}
+  <span class="pill {{ group.media_type }}">{{ group.media_type }}</span>
+  <span class="pill {{ group.match_type }}">{{ group.match_type }}</span>
+  <span class="muted">similarity {{ "%.3f"|format(group.similarity or 0) }}</span>
+</h2>
+
+<form method="post" action="/groups/{{ group.id }}/mark">
+  <table>
+    <thead>
+      <tr>
+        <th>Keeper</th>
+        {% if group.media_type == "video" %}<th></th>{% endif %}
+        <th>Path</th>
+        <th>Size</th>
+        <th>Duration</th>
+        {% if group.media_type == "video" %}<th>Resolution</th>{% endif %}
+        <th>Codec</th>
+        <th>Bitrate</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in members %}
+      <tr>
+        <td><input type="radio" name="keeper_id" value="{{ m.id }}" {% if m.is_keeper %}checked{% endif %}></td>
+        {% if group.media_type == "video" %}
+        <td><img src="/thumbs/{{ m.id }}.jpg" alt=""
+                 style="width:120px;height:auto;border-radius:4px;background:#000"
+                 onerror="this.style.display='none'"></td>
+        {% endif %}
+        <td class="path">{{ m.path }}</td>
+        <td>{{ m.size | bytes }}</td>
+        <td>{{ m.duration | duration }}</td>
+        {% if group.media_type == "video" %}
+        <td>{% if m.width %}{{ m.width }}×{{ m.height }}{% else %}—{% endif %}</td>
+        {% endif %}
+        <td>
+          {% if group.media_type == "video" %}
+            {{ m.video_codec or "—" }} / {{ m.audio_codec or "—" }}
+          {% else %}
+            {{ m.audio_codec or "—" }}
+            {% if m.sample_rate %} <span class="muted">{{ m.sample_rate }} Hz</span>{% endif %}
+          {% endif %}
+        </td>
+        <td>{% if m.bitrate %}{{ (m.bitrate / 1000) | round | int }} kbps{% else %}—{% endif %}</td>
+        <td>
+          <select name="actions">
+            <option value="{{ m.id }}:keep"   {% if m.action == "keep"   or (m.action is none and m.is_keeper) %}selected{% endif %}>keep</option>
+            <option value="{{ m.id }}:delete" {% if m.action == "delete" or (m.action is none and not m.is_keeper) %}selected{% endif %}>delete</option>
+            <option value="{{ m.id }}:ignore" {% if m.action == "ignore" %}selected{% endif %}>ignore</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="margin-top:16px; display:flex; gap:8px;">
+    <button type="submit" class="primary">Save markings</button>
+  </div>
+</form>
+
+<form method="post" action="/groups/{{ group.id }}/execute" style="margin-top:24px"
+      onsubmit="return confirm('Move every file marked DELETE into the trash directory? This will leave the keeper in place.');">
+  <button type="submit" class="danger">Execute deletions (move to trash)</button>
+  <span class="muted" style="margin-left:8px">
+    Files are moved to <code>{{ "/.mediadedup-trash/" }}YYYYMMDD/</code> on the same NFS mount; nothing is unlinked yet.
+  </span>
+</form>
+
+<form method="post" action="/groups/{{ group.id }}/review" style="margin-top:8px">
+  <button type="submit">Mark group reviewed (no deletions)</button>
+</form>
+
+{% endblock %}

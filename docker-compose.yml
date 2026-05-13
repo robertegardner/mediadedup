@@ -1,0 +1,217 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mediadedup-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-mediadedup}
+      POSTGRES_USER: ${DB_USER:-mediadedup}
+      POSTGRES_PASSWORD: ${DB_PASS:-mediadedup}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mediadedup}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - dedup
+
+  redis:
+    image: redis:7-alpine
+    container_name: mediadedup-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - dedup
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mediadedup:latest
+    restart: unless-stopped
+    command: rq worker -u redis://redis:6379/0 dedup
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+      REDIS_URL: redis://redis:6379/0
+      VIDEO_PHASH_FRAMES: ${VIDEO_PHASH_FRAMES:-16}
+      VIDEO_USE_GPU: ${VIDEO_USE_GPU:-1}
+      THUMBS_DIR: /thumbs
+      SHA_TIMEOUT_SECS: ${SHA_TIMEOUT_SECS:-600}
+      STAT_TIMEOUT_SECS: ${STAT_TIMEOUT_SECS:-30}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    volumes:
+      - ${MEDIA_PATH:-/mnt}:/media:rw
+      - thumbs:/thumbs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dedup
+
+  scanner:
+    image: mediadedup:latest
+    container_name: mediadedup-scanner
+    restart: "no"
+    profiles: ["tools"]
+    command: python -m app.scanner
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+      REDIS_URL: redis://redis:6379/0
+      VIDEO_ROOT: /media/video
+      MUSIC_ROOT: /media/music
+    volumes:
+      - ${MEDIA_PATH:-/mnt}:/media:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dedup
+
+  matcher:
+    image: mediadedup:latest
+    container_name: mediadedup-matcher
+    restart: "no"
+    profiles: ["tools"]
+    command: python -m app.matcher
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+      VIDEO_PHASH_THRESHOLD: ${VIDEO_PHASH_THRESHOLD:-12}
+      VIDEO_DURATION_TOLERANCE: ${VIDEO_DURATION_TOLERANCE:-3}
+      CHROMAPRINT_THRESHOLD: ${CHROMAPRINT_THRESHOLD:-0.85}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dedup
+
+  bulk_actions:
+    image: mediadedup:latest
+    container_name: mediadedup-bulk-actions
+    restart: "no"
+    profiles: ["tools"]
+    # Override at run time, e.g.:
+    #   docker compose --profile tools run --rm bulk_actions preview
+    #   docker compose --profile tools run --rm bulk_actions auto-exact
+    entrypoint: ["python", "-m", "app.bulk_actions"]
+    stdin_open: true
+    tty: true
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+    volumes:
+      - ${MEDIA_PATH:-/mnt}:/media:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dedup
+
+  doctor:
+    image: mediadedup:latest
+    container_name: mediadedup-doctor
+    restart: "no"
+    profiles: ["tools"]
+    command: python -m app.doctor
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+      VIDEO_PHASH_THRESHOLD: ${VIDEO_PHASH_THRESHOLD:-12}
+      VIDEO_DURATION_TOLERANCE: ${VIDEO_DURATION_TOLERANCE:-3}
+      VIDEO_USE_GPU: ${VIDEO_USE_GPU:-1}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dedup
+
+  web:
+    image: mediadedup:latest
+    container_name: mediadedup-web
+    restart: unless-stopped
+    command: uvicorn app.web:app --host 0.0.0.0 --port 8000
+    ports:
+      - "${WEB_PORT:-8088}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mediadedup}
+      DB_USER: ${DB_USER:-mediadedup}
+      DB_PASS: ${DB_PASS:-mediadedup}
+      REDIS_URL: redis://redis:6379/0
+      THUMBS_DIR: /thumbs
+      VIDEO_ROOT: /media/video
+      MUSIC_ROOT: /media/music
+      REAPER_STUCK_THRESHOLD_SECS: ${REAPER_STUCK_THRESHOLD_SECS:-1800}
+      REAPER_INTERVAL_SECS: ${REAPER_INTERVAL_SECS:-120}
+      DEDUP_SCHEDULE_CRON: ${DEDUP_SCHEDULE_CRON:-0 4 * * *}
+      DEDUP_AUTO_DELETE_EXACT: ${DEDUP_AUTO_DELETE_EXACT:-0}
+      DEDUP_AUTO_DELETE_SIM_THRESHOLD: ${DEDUP_AUTO_DELETE_SIM_THRESHOLD:-}
+    volumes:
+      - ${MEDIA_PATH:-/mnt}:/media:rw
+      - thumbs:/thumbs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dedup
+
+volumes:
+  pgdata:
+  redisdata:
+  thumbs:
+
+networks:
+  dedup:
+    driver: bridge
