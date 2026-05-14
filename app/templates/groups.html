@@ -25,21 +25,26 @@
       <option value="yes" {% if filters.reviewed == "yes" %}selected{% endif %}>yes</option>
     </select>
   </label>
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <input type="hidden" name="order" value="{{ order }}">
   <button type="submit" class="primary">Filter</button>
   <span class="muted">{{ total }} groups</span>
 </form>
+
+{% macro sort_url(col) %}?type={{ filters.type or '' }}&match={{ filters.match or '' }}&reviewed={{ filters.reviewed or '' }}&sort={{ col }}&order={% if sort == col and order == 'desc' %}asc{% else %}desc{% endif %}&page=1{% endmacro %}
+{% macro sort_icon(col) %}{% if sort == col %}{% if order == 'desc' %} ↓{% else %} ↑{% endif %}{% endif %}{% endmacro %}
 
 {% if groups %}
 <table>
   <thead>
     <tr>
-      <th>#</th>
+      <th><a class="sort-link{% if sort == 'id' %} active{% endif %}" href="{{ sort_url('id') }}">#{{ sort_icon('id') }}</a></th>
       <th>Type</th>
       <th>Match</th>
-      <th>Sim.</th>
-      <th>Members</th>
-      <th>Total size</th>
-      <th>Reclaimable</th>
+      <th><a class="sort-link{% if sort == 'similarity' %} active{% endif %}" href="{{ sort_url('similarity') }}">Sim.{{ sort_icon('similarity') }}</a></th>
+      <th><a class="sort-link{% if sort == 'members' %} active{% endif %}" href="{{ sort_url('members') }}">Members{{ sort_icon('members') }}</a></th>
+      <th><a class="sort-link{% if sort == 'size' %} active{% endif %}" href="{{ sort_url('size') }}">Total size{{ sort_icon('size') }}</a></th>
+      <th><a class="sort-link{% if sort == 'reclaimable' %} active{% endif %}" href="{{ sort_url('reclaimable') }}">Reclaimable{{ sort_icon('reclaimable') }}</a></th>
       <th>Reviewed</th>
       <th></th>
     </tr>
@@ -62,10 +67,11 @@
 </table>
 
 {% set last_page = ((total - 1) // per_page) + 1 if total else 1 %}
+{% set base_qs = "type=" ~ (filters.type or '') ~ "&match=" ~ (filters.match or '') ~ "&reviewed=" ~ (filters.reviewed or '') ~ "&sort=" ~ sort ~ "&order=" ~ order %}
 <div class="pagination">
-  {% if page > 1 %}<a class="btn" href="?type={{ filters.type or '' }}&match={{ filters.match or '' }}&reviewed={{ filters.reviewed or '' }}&page={{ page - 1 }}">← prev</a>{% endif %}
+  {% if page > 1 %}<a class="btn" href="?{{ base_qs }}&page={{ page - 1 }}">← prev</a>{% endif %}
   <span class="muted">page {{ page }} / {{ last_page }}</span>
-  {% if page < last_page %}<a class="btn" href="?type={{ filters.type or '' }}&match={{ filters.match or '' }}&reviewed={{ filters.reviewed or '' }}&page={{ page + 1 }}">next →</a>{% endif %}
+  {% if page < last_page %}<a class="btn" href="?{{ base_qs }}&page={{ page + 1 }}">next →</a>{% endif %}
 </div>
 
 {% else %}

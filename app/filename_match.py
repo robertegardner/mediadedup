@@ -109,10 +109,6 @@ _RELEASE_GROUP_RE = re.compile(
 # Bracketed annotations -- [XvX], [XC], [whatever]
 _BRACKET_RE = re.compile(r"[\[\(\{][^\]\)\}]*[\]\)\}]")
 
-# Trailing sequential markers: " (1)", " 1", "_1", "-1" before extension
-_SEQUENTIAL_SUFFIX_RE = re.compile(r"[\s._-]*(\(\d+\)|\d{1,2})$")
-
-
 def _basename_no_ext(path: str) -> str:
     base = os.path.basename(path)
     base = os.path.splitext(base)[0]
@@ -179,9 +175,7 @@ def normalize(path: str) -> str:
         kept.append(t)
     tokens = kept
 
-    # Drop trailing sequential marker if it survived (e.g. "blah 1" remaining)
     rejoined = " ".join(tokens)
-    rejoined = _SEQUENTIAL_SUFFIX_RE.sub("", rejoined).strip()
 
     # Collapse whitespace
     rejoined = re.sub(r"\s+", " ", rejoined).strip()

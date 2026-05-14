@@ -85,7 +85,12 @@ def _bucket_videos(rows: list[dict]) -> dict[tuple[int, int], list[dict]]:
 
 def find_video_perceptual() -> int:
     """Cluster videos by phash similarity. Skips files already in an exact group."""
-    threshold = CFG.video_phash_threshold
+    from . import settings as _settings
+    stored = _settings.get("matcher.video_phash_similarity")
+    if stored is not None:
+        threshold = round((1.0 - float(stored)) * 64)
+    else:
+        threshold = CFG.video_phash_threshold
     tol = CFG.video_duration_tolerance
     with session() as conn, conn.cursor() as cur:
         cur.execute(
@@ -180,7 +185,9 @@ def find_video_perceptual() -> int:
 
 def find_audio_chromaprint() -> int:
     """Cluster audio by Chromaprint similarity."""
-    threshold = CFG.chromaprint_threshold
+    from . import settings as _settings
+    stored = _settings.get("matcher.chromaprint_threshold")
+    threshold = float(stored) if stored is not None else CFG.chromaprint_threshold
     tol = CFG.video_duration_tolerance
     with session() as conn, conn.cursor() as cur:
         cur.execute(

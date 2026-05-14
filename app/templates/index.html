@@ -1162,6 +1162,102 @@
 </script>
 
 
+<!-- Matcher sensitivity: controls how aggressively perceptual/chromaprint
+     groups are formed on the next matcher run. Stored in the settings table
+     so changes take effect without restarting the container. -->
+<div class="card" id="matcherSensCard">
+  <h3>Matcher sensitivity</h3>
+  <div class="muted" style="margin-bottom:14px; font-size:13px">
+    Controls how aggressively perceptual (video) and chromaprint (audio) matching
+    groups files. Lower = more aggressive (more groups found). Takes effect on the
+    next matcher run; existing groups are not affected until you re-run the matcher.
+  </div>
+
+  <div style="display:grid; gap:14px">
+    <div>
+      <label style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        <span style="min-width:160px">Video similarity min:</span>
+        <input type="range" id="videoSimSlider" min="0.70" max="1.00" step="0.01" value="0.81"
+               style="width:200px">
+        <span id="videoSimLabel" style="font-variant-numeric:tabular-nums; font-weight:600; min-width:3em">0.81</span>
+        <span class="muted" id="videoHammingLabel" style="font-size:11px">(hamming ≤ 12)</span>
+      </label>
+    </div>
+    <div>
+      <label style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        <span style="min-width:160px">Audio similarity min:</span>
+        <input type="range" id="audioSimSlider" min="0.70" max="1.00" step="0.01" value="0.85"
+               style="width:200px">
+        <span id="audioSimLabel" style="font-variant-numeric:tabular-nums; font-weight:600; min-width:3em">0.85</span>
+      </label>
+    </div>
+  </div>
+
+  <div style="display:flex; align-items:center; gap:10px; margin-top:14px">
+    <button type="button" id="matcherSensBtn" class="primary">Save thresholds</button>
+    <span id="matcherSensStatus" class="muted" style="font-size:12px"></span>
+  </div>
+</div>
+
+<script>
+(async function () {
+  const videoSlider = document.getElementById('videoSimSlider');
+  const videoLabel  = document.getElementById('videoSimLabel');
+  const hammingLabel = document.getElementById('videoHammingLabel');
+  const audioSlider = document.getElementById('audioSimSlider');
+  const audioLabel  = document.getElementById('audioSimLabel');
+  const saveBtn     = document.getElementById('matcherSensBtn');
+  const statusEl    = document.getElementById('matcherSensStatus');
+
+  function updateVideoLabel() {
+    const v = parseFloat(videoSlider.value);
+    videoLabel.textContent = v.toFixed(2);
+    const h = Math.round((1.0 - v) * 64);
+    hammingLabel.textContent = `(hamming ≤ ${h})`;
+  }
+  function updateAudioLabel() {
+    audioLabel.textContent = parseFloat(audioSlider.value).toFixed(2);
+  }
+
+  videoSlider.addEventListener('input', updateVideoLabel);
+  audioSlider.addEventListener('input', updateAudioLabel);
+
+  // Load saved values.
+  try {
+    const r = await fetch('/api/settings?prefix=matcher.', {cache: 'no-store'});
+    if (r.ok) {
+      const {settings} = await r.json();
+      if (settings['matcher.video_phash_similarity']) {
+        videoSlider.value = settings['matcher.video_phash_similarity'];
+      }
+      if (settings['matcher.chromaprint_threshold']) {
+        audioSlider.value = settings['matcher.chromaprint_threshold'];
+      }
+    }
+  } catch (_) {}
+  updateVideoLabel();
+  updateAudioLabel();
+
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    statusEl.textContent = 'Saving…';
+    try {
+      const body = new URLSearchParams({
+        'matcher.video_phash_similarity': parseFloat(videoSlider.value).toFixed(2),
+        'matcher.chromaprint_threshold':  parseFloat(audioSlider.value).toFixed(2),
+      });
+      const r = await fetch('/api/settings', {method: 'POST', body});
+      if (!r.ok) throw new Error(r.status);
+      statusEl.textContent = 'Saved. Takes effect on next matcher run.';
+    } catch (e) {
+      statusEl.textContent = 'Save failed: ' + e;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+})();
+</script>
+
 <h2>Existing duplicate groups</h2>
 
 <!-- Bulk auto-delete for exact matches. Only safe path to automate; perceptual
@@ -1203,7 +1299,7 @@
   <div style="display:flex; align-items:center; gap:16px; margin-bottom:12px; flex-wrap:wrap">
     <label style="display:flex; align-items:center; gap:8px">
       Threshold:
-      <input type="range" id="simThresh" min="0.85" max="1.00" step="0.01" value="0.98"
+      <input type="range" id="simThresh" min="0.70" max="1.00" step="0.01" value="0.98"
              style="width:240px">
       <span id="simThreshLabel" style="font-variant-numeric: tabular-nums; font-weight:600;
                                        min-width:3.5em; display:inline-block">0.98</span>

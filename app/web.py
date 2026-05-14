@@ -189,12 +189,23 @@ def dashboard(request: Request) -> HTMLResponse:
 # Group list
 # ---------------------------------------------------------------------------
 
+_GROUP_SORT_COLS = {
+    "reclaimable": "(SUM(f.size) - COALESCE(MAX(f.size) FILTER (WHERE m.is_keeper),0))",
+    "size": "SUM(f.size)",
+    "similarity": "g.similarity",
+    "members": "COUNT(m.file_id)",
+    "id": "g.id",
+}
+
+
 @app.get("/groups", response_class=HTMLResponse)
 def list_groups(
     request: Request,
     type: str | None = None,
     match: str | None = None,
     reviewed: str | None = None,
+    sort: str = "reclaimable",
+    order: str = "desc",
     page: int = 1,
     per_page: int = 50,
 ) -> HTMLResponse:
@@ -211,6 +222,10 @@ def list_groups(
     elif reviewed == "no":
         where.append("g.reviewed = FALSE")
     where_sql = " AND ".join(where)
+
+    sort = sort if sort in _GROUP_SORT_COLS else "reclaimable"
+    order = "asc" if order == "asc" else "desc"
+    order_sql = f"{_GROUP_SORT_COLS[sort]} {order.upper()} NULLS LAST"
 
     page = max(1, page)
     per_page = max(1, min(200, per_page))
@@ -230,7 +245,7 @@ def list_groups(
                   JOIN files f ON f.id = m.file_id
                  WHERE {where_sql}
                  GROUP BY g.id
-                 ORDER BY (SUM(f.size) - COALESCE(MAX(f.size) FILTER (WHERE m.is_keeper),0)) DESC
+                 ORDER BY {order_sql}
                  LIMIT %s OFFSET %s""",
             [*params, per_page, offset],
         )
@@ -245,6 +260,8 @@ def list_groups(
             "page": page,
             "per_page": per_page,
             "filters": {"type": type, "match": match, "reviewed": reviewed},
+            "sort": sort,
+            "order": order,
         },
     )
 
@@ -384,15 +401,11 @@ def auto_delete_similarity(
 ) -> RedirectResponse:
     """Mark + execute every unreviewed similarity-match group at or above
     ``threshold``.
-
-    Refuses thresholds below 0.85 to prevent foot-shooting -- if you really
-    need that low, run the CLI which has no floor.
     """
-    if threshold < 0.85 or threshold > 1.0:
+    if threshold < 0.70 or threshold > 1.0:
         raise HTTPException(
             400,
-            f"threshold must be between 0.85 and 1.0 (got {threshold}). "
-            f"For looser matches, use the CLI.",
+            f"threshold must be between 0.70 and 1.0 (got {threshold}).",
         )
 
     mts = (
