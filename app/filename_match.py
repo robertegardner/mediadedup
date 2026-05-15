@@ -480,12 +480,18 @@ def find_filename_matches(
     # Persist to dup_groups / dup_members
     inserted_members = 0
     with session() as conn, conn.cursor() as cur:
-        # Wipe prior filename groups -- idempotent rebuild
+        # Wipe prior filename groups for this media_type -- idempotent rebuild.
+        # Scoped to media_type so a double-call (video then audio) doesn't
+        # clobber the first pass's results.
         cur.execute(
             "DELETE FROM dup_members WHERE group_id IN "
-            "(SELECT id FROM dup_groups WHERE match_type='filename')"
+            "(SELECT id FROM dup_groups WHERE match_type='filename' AND media_type=%s)",
+            (media_type,),
         )
-        cur.execute("DELETE FROM dup_groups WHERE match_type='filename'")
+        cur.execute(
+            "DELETE FROM dup_groups WHERE match_type='filename' AND media_type=%s",
+            (media_type,),
+        )
 
         for grp in all_groups:
             grp_sorted = sorted(grp, key=keeper_score, reverse=True)

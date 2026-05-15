@@ -182,7 +182,9 @@ def _matcher_work() -> dict:
     fname_stats = {}
     try:
         log.info("Running filename matcher (phase 1)")
-        fname_stats = filename_match.find_filename_matches(media_type="video")
+        video_stats = filename_match.find_filename_matches(media_type="video")
+        audio_stats = filename_match.find_filename_matches(media_type="audio")
+        fname_stats = {"video": video_stats, "audio": audio_stats}
         log.info("Filename matcher done: %s", fname_stats)
     except Exception:
         log.exception("filename matcher failed; continuing to fingerprint matcher")
@@ -210,8 +212,9 @@ def _filename_match_work() -> dict:
     matcher to complete.
     """
     from . import filename_match
-    stats = filename_match.find_filename_matches(media_type="video")
-    return stats
+    video_stats = filename_match.find_filename_matches(media_type="video")
+    audio_stats = filename_match.find_filename_matches(media_type="audio")
+    return {"video": video_stats, "audio": audio_stats}
 
 
 def _llm_match_work() -> dict:
