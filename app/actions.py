@@ -100,7 +100,12 @@ def execute_group(group_id: int, summary: DeletionSummary | None = None) -> Dele
         members = cur.fetchall()
 
         for m in members:
-            if m["action"] != "delete" or m["is_keeper"]:
+            # action is NULL for exact/perceptual/chromaprint groups until
+            # auto_mark or "Save markings" runs. Fall back to is_keeper.
+            action = m["action"] if m["action"] is not None else (
+                "keep" if m["is_keeper"] else "delete"
+            )
+            if action != "delete" or m["is_keeper"]:
                 continue
             src = Path(m["path"])
             if not src.exists():

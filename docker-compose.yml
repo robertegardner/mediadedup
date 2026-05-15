@@ -63,7 +63,11 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
     volumes:
-      - ${MEDIA_PATH:-/mnt}:/media:rw
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt}
+        target: /media
+        bind:
+          propagation: slave
       - thumbs:/thumbs
     depends_on:
       postgres:
@@ -89,7 +93,12 @@ services:
       VIDEO_ROOT: /media/video
       MUSIC_ROOT: /media/music
     volumes:
-      - ${MEDIA_PATH:-/mnt}:/media:ro
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt}
+        target: /media
+        read_only: true
+        bind:
+          propagation: slave
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,7 +146,11 @@ services:
       DB_USER: ${DB_USER:-mediadedup}
       DB_PASS: ${DB_PASS:-mediadedup}
     volumes:
-      - ${MEDIA_PATH:-/mnt}:/media:rw
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt}
+        target: /media
+        bind:
+          propagation: slave
     depends_on:
       postgres:
         condition: service_healthy
@@ -197,7 +210,11 @@ services:
       DEDUP_AUTO_DELETE_EXACT: ${DEDUP_AUTO_DELETE_EXACT:-0}
       DEDUP_AUTO_DELETE_SIM_THRESHOLD: ${DEDUP_AUTO_DELETE_SIM_THRESHOLD:-}
     volumes:
-      - ${MEDIA_PATH:-/mnt}:/media:rw
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt}
+        target: /media
+        bind:
+          propagation: slave
       - thumbs:/thumbs:ro
     depends_on:
       postgres:

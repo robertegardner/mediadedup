@@ -176,6 +176,37 @@ UPDATE files
  WHERE status='missing' AND sha256 IS NULL;
 ```
 
+### Music deletions fail with Permission denied (FIXED)
+
+Symptom: `shutil.move` on `/media/music/...` raises `[Errno 13] Permission
+denied` even though the host can write there fine. Whisparr deletions work
+because whisparr happened to be mounted when the container started; music was
+idle and never got its mount.
+
+Root cause: Docker bind-mounts `/mnt` into containers with default `rprivate`
+propagation. When autofs triggers a CIFS mount on the host **after** the
+container started, the new mount lives only in the host's mount namespace and
+never propagates in. The container sees the autofs ghost directory and gets
+EPERM when it tries to traverse it.
+
+Fix (deployed 2026-05-15):
+1. All services in `docker-compose.yml` that mount `/mnt` now use long-form
+   bind syntax with `propagation: slave`. This lets host-side autofs mounts
+   propagate into containers, and container accesses to an unmounted autofs
+   path retrigger the mount on the host (which then propagates back in).
+2. `/etc/auto.master` timeout raised from 60 s to 600 s (was supposed to be
+   600 all along — it had drifted).
+
+After changing `docker-compose.yml`, restart affected containers:
+```bash
+docker compose up -d web worker
+```
+Autofs change requires:
+```bash
+sudo sed -i 's/--timeout=60/--timeout=600/' /etc/auto.master
+sudo systemctl restart autofs
+```
+
 ### SMB stale file handles
 
 Symptom: workers fail with "Stale file handle" or I/O errors after NAS reboot.
